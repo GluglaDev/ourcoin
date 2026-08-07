@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Runtime data and local secrets
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.wallet
+*.wallet.json
+wallets/
+.env
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

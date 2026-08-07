@@ -1,0 +1,21 @@
+{
+  "unsigned": [
+    {"kind": "u8", "value": 0, "hex": "00"},
+    {"kind": "u8", "value": 255, "hex": "ff"},
+    {"kind": "u16", "value": 4660, "hex": "1234"},
+    {"kind": "u32", "value": 16909060, "hex": "01020304"},
+    {"kind": "u64", "value": 18446744073709551615, "hex": "ffffffffffffffff"}
+  ],
+  "bytes": [
+    {"value_hex": "", "hex": "00000000"},
+    {"value_hex": "4f5552", "hex": "000000034f5552"}
+  ],
+  "text": [
+    {"value": "OurCoin", "hex": "000000074f7572436f696e"},
+    {"value": "é", "hex": "00000002c3a9"}
+  ],
+  "sequence": {
+    "values_hex": ["aa", "bbcc"],
+    "hex": "0000000200000001aa00000002bbcc"
+  }
+}
