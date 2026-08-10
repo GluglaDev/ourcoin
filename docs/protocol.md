@@ -143,3 +143,26 @@ as associated data, so changing it makes decryption fail.
 The file format is local storage, not part of transaction or block consensus. Private key
 material is never written as plaintext, and the CLI obtains passwords interactively instead
 of accepting them in process arguments.
+
+## SQLite storage schema v1 (non-consensus)
+
+M6 stores canonical block components rather than Python objects or executable serialization:
+
+- `header_bytes` is exactly `BlockHeader.to_bytes()`;
+- `reward_bytes` is exactly `RewardTransaction.to_bytes()`;
+- every ordinary transaction BLOB is exactly `Transaction.to_bytes()` and carries its body
+  position and derived transaction ID.
+
+The body is reconstructed from those ordered components. M6 does not introduce a combined
+block transport envelope and does not change any transaction, reward, header or block hash.
+
+Schema version 1 contains network metadata, accepted blocks, ordered block transactions, the
+canonical height index, accounts and the confirmed-transaction replay index. Heights, balances,
+nonces and issued supply are canonical eight-byte unsigned big-endian BLOBs. Cumulative work is
+a positive 40-byte unsigned big-endian BLOB, which covers the full consensus height range
+without SQLite's signed-64-bit integer limit. Acceptance order is local node metadata used to
+reproduce equal-work fork choices after restart.
+
+Both `PRAGMA user_version` and the metadata schema version equal `1`. The database identity is
+bound to `chain_id` and the exact genesis hash. These storage details are local and do not take
+part in block validation or peer consensus.

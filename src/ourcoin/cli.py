@@ -11,6 +11,7 @@ from pathlib import Path
 from ourcoin.consensus import ATOMS_PER_OUR
 from ourcoin.encoding import U64_MAX
 from ourcoin.node import LocalNode, NodeError
+from ourcoin.storage import SQLiteChainStorage, StorageError, StorageInfo
 from ourcoin.wallet import Wallet, WalletError
 
 DEFAULT_FEE_ATOMS = ATOMS_PER_OUR // 100
@@ -91,12 +92,9 @@ def _shell_help() -> str:
     )
 
 
-def run_shell() -> None:
-    """Run an explicitly ephemeral, single-process local testnet session."""
-
-    node = LocalNode()
+def _run_shell_session(node: LocalNode) -> None:
     wallets: dict[str, Wallet] = {}
-    print("OurCoin M5 local shell (in-memory; closing it discards all state)")
+    print("OurCoin M6 local shell (blockchain state is persistent; wallets are in-memory)")
     print(_shell_help())
     while True:
         try:
@@ -153,11 +151,47 @@ def run_shell() -> None:
             print(f"error: {message}")
 
 
+def run_shell(data_dir: str | Path = Path("data")) -> None:
+    """Run a persistent single-process local testnet session."""
+
+    with LocalNode.open_persistent(data_dir) as node:
+        _run_shell_session(node)
+
+
+def _storage_info_document(info: StorageInfo) -> dict[str, object]:
+    return {
+        "schema_version": info.schema_version,
+        "chain_id": info.chain_id,
+        "genesis_hash": info.genesis_hash.hex(),
+        "database_path": str(info.database_path.resolve()),
+        "height": info.height,
+        "tip_hash": info.tip_hash.hex(),
+        "cumulative_work": str(info.cumulative_work),
+        "issued_supply_atoms": info.issued_supply_atoms,
+        "issued_supply_our": format_atoms(info.issued_supply_atoms),
+        "block_count": info.block_count,
+        "account_count": info.account_count,
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ourcoin")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("demo", help="run a public two-wallet local workflow")
-    subparsers.add_parser("shell", help="open an ephemeral local node session")
+    shell = subparsers.add_parser("shell", help="open a persistent local node session")
+    shell.add_argument("--data-dir", type=Path, default=Path("data"))
+    chain = subparsers.add_parser("chain", help="inspect and rebuild persistent chain data")
+    chain_commands = chain.add_subparsers(dest="chain_command", required=True)
+    chain_info = chain_commands.add_parser("info", help="show persistent chain metadata")
+    chain_info.add_argument("--data-dir", type=Path, default=Path("data"))
+    chain_validate = chain_commands.add_parser(
+        "validate", help="validate SQLite data by replaying all blocks"
+    )
+    chain_validate.add_argument("--data-dir", type=Path, default=Path("data"))
+    chain_reindex = chain_commands.add_parser(
+        "reindex", help="atomically rebuild persistent derived state"
+    )
+    chain_reindex.add_argument("--data-dir", type=Path, default=Path("data"))
     wallet = subparsers.add_parser("wallet", help="manage encrypted wallet files")
     wallet_commands = wallet.add_subparsers(dest="wallet_command", required=True)
     create = wallet_commands.add_parser("create", help="create an encrypted wallet")
@@ -175,7 +209,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "demo":
             print(json.dumps(demo_summary(), indent=2, sort_keys=True))
         elif arguments.command == "shell":
-            run_shell()
+            run_shell(arguments.data_dir)
+        elif arguments.command == "chain":
+            create = arguments.chain_command == "info"
+            with SQLiteChainStorage.open(arguments.data_dir, create=create) as storage:
+                if arguments.chain_command == "info":
+                    document = _storage_info_document(storage.info())
+                elif arguments.chain_command == "validate":
+                    validation_report = storage.validate()
+                    document = {
+                        "valid": validation_report.valid,
+                        "block_count": validation_report.block_count,
+                        "account_count": validation_report.account_count,
+                        "height": validation_report.height,
+                        "tip_hash": validation_report.tip_hash.hex(),
+                    }
+                else:
+                    reindex_report = storage.reindex()
+                    document = {
+                        "reindexed": True,
+                        "block_count": reindex_report.block_count,
+                        "account_count": reindex_report.account_count,
+                        "height": reindex_report.height,
+                        "tip_hash": reindex_report.tip_hash.hex(),
+                    }
+                print(json.dumps(document, indent=2, sort_keys=True))
         elif arguments.wallet_command == "create":
             password = getpass.getpass("Wallet password: ")
             confirmation = getpass.getpass("Confirm password: ")
@@ -197,7 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
-    except (CliError, NodeError, WalletError, OSError) as error:
+    except (CliError, NodeError, StorageError, WalletError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     return 0

@@ -24,6 +24,8 @@ M1 introduces three dependency-light foundations:
   password-encrypted files.
 - `node.py` joins the chain, mempool and miner for single-process local workflows.
 - `cli.py` parses fixed-point OUR amounts and exposes the M5 demo, shell and wallet commands.
+- `storage.py` owns the SQLite schema, network identity checks, atomic persistence, replay
+  validation and reindexing; it never stores wallet secrets.
 
 Later consensus objects must construct their signed or hashed bytes from the primitives in
 `encoding.py`. They must not serialize dictionaries, JSON objects or Python object state.
@@ -40,5 +42,15 @@ the mempool, remaining entries are revalidated against the new active snapshot, 
 transactions from disconnected blocks are returned in chronological order. A side branch
 that does not become active does not change pending transactions.
 
-The M5 node is deliberately in memory. It is an integration boundary, not yet a daemon or a
-network peer; transactional chain storage and restart reconstruction belong to M6.
+M6 keeps the in-memory `Chain` as the validation authority. A persistent node validates an
+incoming block on an independent chain copy, commits the block and any canonical state switch
+inside one SQLite transaction, and replaces its active in-memory chain only after the commit.
+This prevents a failed database write from advancing either representation.
+
+SQLite stores every validated branch in acceptance order. Startup replays those blocks through
+the existing `Chain.add_block()` path, reproducing equal-work fork decisions without duplicating
+consensus rules in storage. Accounts, confirmed transaction IDs, canonical-height mappings and
+the current supply are derived caches that `chain reindex` can atomically rebuild from blocks.
+
+Storage paths include both chain ID and genesis hash. Runtime opening is restricted to the
+defined testnet; the path boundary is generic only so future networks cannot share data.
