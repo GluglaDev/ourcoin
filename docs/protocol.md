@@ -59,7 +59,7 @@ must be exactly 32 bytes and signatures exactly 64 bytes. Decoders reject traili
 The public cross-platform vector is stored in `tests/vectors/transaction.json`. It contains
 only public transaction material; no private key or seed is persisted.
 
-Block-body transport encoding remains unfrozen until persistence and P2P milestones.
+The signed transaction encoding is unchanged when carried in an M7 P2P frame.
 
 ## Merkle tree v1
 
@@ -106,8 +106,7 @@ as an unsigned big-endian integer is less than or equal to the target.
 
 The transaction root contains the reward ID followed by ordinary transaction IDs. The state
 root describes the state after ordinary transfers and the miner reward. M3 block bodies use
-an immutable tuple of at most 10,000 ordinary transactions; their transport encoding remains
-deferred until persistence and P2P milestones.
+an immutable tuple of at most 10,000 ordinary transactions.
 
 ## Chain work and difficulty v1
 
@@ -166,3 +165,46 @@ reproduce equal-work fork choices after restart.
 Both `PRAGMA user_version` and the metadata schema version equal `1`. The database identity is
 bound to `chain_id` and the exact genesis hash. These storage details are local and do not take
 part in block validation or peer consensus.
+
+## P2P wire protocol v1 (non-consensus)
+
+Every TCP message uses this exact fixed prefix followed by its payload:
+
+```text
+magic[4] = "OURP"
+u16 protocol_version = 1
+u8 message_type
+u32 payload_length
+checksum[4] = first_4_bytes(SHA-256(payload))
+payload[payload_length]
+```
+
+The maximum payload is 8 MiB. Parsers reject another magic, unknown version or message type,
+truncation, trailing bytes, a bad checksum and an oversized declared payload before dispatch.
+The first message in each direction must be `HELLO`. Its canonical payload contains a random
+16-byte node ID, chain ID, exact genesis hash, active tip hash, height, positive cumulative
+work encoded in 40 bytes, and listening port. A connection is rejected for a foreign identity,
+self-connection or duplicate node ID.
+
+Version 1 defines these messages:
+
+- `HELLO` (1): peer and chain identity plus active-chain summary;
+- `GET_BLOCKS` (2): a newest-first locator of at most 64 block hashes;
+- `BLOCK` (3): one bounded block transport envelope;
+- `TRANSACTION` (4): the existing canonical `Transaction.to_bytes()` value;
+- `SYNC_COMPLETE` (5): tip hash, height and cumulative work;
+- `PING` (6) and `PONG` (7): one canonical `u64` nonce;
+- `REJECT` (8): bounded numeric code and public reason text.
+
+An idle connection sends a nonce-bearing `PING`; the matching `PONG` proves liveness. A missing
+or mismatched answer closes the connection.
+
+The block transport envelope is
+`bytes("OURCOIN:P2P:BLOCK:V1") || bytes(header) || bytes(reward) || sequence(transactions)`.
+The three components are exactly the existing M1/M3 canonical encodings, so the envelope does
+not change block IDs, transaction IDs, signatures, Merkle roots or consensus validation.
+
+Locators use the active tip followed by increasingly sparse ancestors and always include
+genesis. A response carries at most 128 consecutive active-chain blocks. If more remain, the
+receiver observes the higher `SYNC_COMPLETE` work and requests the next batch. Every received
+block and transaction passes through the existing node validation path before relay.

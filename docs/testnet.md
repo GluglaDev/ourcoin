@@ -26,3 +26,13 @@ data/ourcoin-testnet-v1/0250f3a3c3d1c40da9d3aca119c0e44bbae7751e83fe37722ecfa0d5
 The directory includes both network identity fields to prevent accidental reuse by another
 genesis. M6 refuses all other runtime networks with `UnsupportedNetworkError`; it does not
 define or activate mainnet parameters. Use `--data-dir PATH` to choose another base directory.
+
+## M7 local peer network
+
+The default peer endpoint is `127.0.0.1:19733`. Port `0` may be used by tests to request an
+ephemeral operating-system port. Runtime listening and dialing are restricted to the loopback
+names and addresses `127.0.0.1`, `::1` and `localhost`.
+
+Peers must present `ourcoin-testnet-v1` and the exact genesis hash above in their first framed
+message. M7 intentionally has no seed list, peer discovery, DNS bootstrap, NAT traversal, TLS,
+mainnet identity or public internet deployment. A devnet identity is not activated.
