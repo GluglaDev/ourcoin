@@ -18,3 +18,19 @@ must not partially mutate state.
   It must not be exposed as a service or used for assets with real monetary value.
 - Mempool limits and per-sender caps reduce simple memory exhaustion but do not replace the
   peer-level admission, rate limiting and eviction rules required in M7.
+
+## M6 persistent storage boundary
+
+- SQLite enables foreign keys, WAL journaling, `synchronous=FULL`, a busy timeout and untrusted
+  schema restrictions. A block, its transactions and any canonical state switch share one
+  explicit transaction.
+- Validation happens on an independent in-memory chain copy. A validation or write error rolls
+  back SQLite and leaves the active chain unchanged; the mempool remains deliberately volatile.
+- Startup and `chain validate` replay canonical bytes through the existing consensus engine and
+  compare the result with cached tip, supply, accounts and replay IDs.
+- `chain reindex` repairs only derived indexes and state after validating raw blocks. It refuses
+  corrupted block bytes, an unknown schema, a foreign chain ID or a different genesis.
+- WAL improves crash durability but is not a backup. Operators must copy the database together
+  with its WAL using SQLite-aware backup procedures while the node is stopped or coordinated.
+- M6 has no multi-process writer coordination beyond SQLite locking, no pruning and no storage
+  quotas. These remain operational risks for later node and networking milestones.

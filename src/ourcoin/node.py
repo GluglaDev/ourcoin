@@ -1,6 +1,7 @@
-"""Single-process M5 node that joins the chain, mempool, wallet and miner."""
+"""Single-process node joining chain, optional SQLite storage, mempool and miner."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ourcoin.account import Account
 from ourcoin.block import Block
@@ -10,6 +11,7 @@ from ourcoin.consensus import MAX_BLOCK_TRANSACTIONS
 from ourcoin.encoding import U64_MAX
 from ourcoin.mempool import Mempool, MempoolError
 from ourcoin.miner import mine_block
+from ourcoin.storage import SQLiteChainStorage
 from ourcoin.transaction import Transaction
 from ourcoin.wallet import Wallet, WalletError
 
@@ -27,15 +29,42 @@ class MiningResult:
 
 
 class LocalNode:
-    """An in-memory node for deterministic local workflows and integration tests."""
+    """A local node with optional transactional SQLite persistence."""
 
-    def __init__(self, *, network: NetworkConfig = TESTNET) -> None:
-        self.chain = Chain(network=network)
+    def __init__(
+        self,
+        *,
+        network: NetworkConfig = TESTNET,
+        storage: SQLiteChainStorage | None = None,
+    ) -> None:
+        if storage is not None and storage.network != network:
+            raise NodeError("storage belongs to another network")
+        self._storage = storage
+        self.chain = storage.load_chain() if storage is not None else Chain(network=network)
         self.mempool = Mempool()
+
+    @classmethod
+    def open_persistent(
+        cls,
+        base_data_dir: str | Path = Path("data"),
+        *,
+        network: NetworkConfig = TESTNET,
+        create: bool = True,
+    ) -> "LocalNode":
+        storage = SQLiteChainStorage.open(base_data_dir, network=network, create=create)
+        try:
+            return cls(network=network, storage=storage)
+        except Exception:
+            storage.close()
+            raise
 
     @property
     def network(self) -> NetworkConfig:
         return self.chain.network
+
+    @property
+    def is_persistent(self) -> bool:
+        return self._storage is not None
 
     def account(self, address: str) -> Account:
         return self.chain.state.get_account(address)
@@ -86,7 +115,13 @@ class LocalNode:
     def submit_block(self, block: Block) -> ChainUpdate:
         """Add a block and reconcile pending transactions after an active-tip change."""
 
-        update = self.chain.add_block(block)
+        if self._storage is None:
+            update = self.chain.add_block(block)
+        else:
+            candidate_chain = self.chain.copy()
+            update = candidate_chain.add_block(block)
+            self._storage.persist_chain_update(candidate_chain, update)
+            self.chain = candidate_chain
         if not update.became_active:
             return update
 
@@ -150,6 +185,16 @@ class LocalNode:
         )
         block = mine_block(candidate, max_attempts=max_attempts)
         return MiningResult(block=block, update=self.submit_block(block))
+
+    def close(self) -> None:
+        if self._storage is not None:
+            self._storage.close()
+
+    def __enter__(self) -> "LocalNode":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
 
 __all__ = ["DEFAULT_TRANSACTION_LIFETIME_BLOCKS", "LocalNode", "MiningResult", "NodeError"]

@@ -79,6 +79,19 @@ def test_chain_starts_at_valid_genesis() -> None:
     assert chain.cumulative_work == work_for_target(TESTNET_INITIAL_TARGET)
 
 
+def test_chain_copy_can_advance_without_mutating_original() -> None:
+    chain = Chain()
+    copied = chain.copy()
+    _key, miner = _key_and_address()
+    block = _mine_on(copied, copied.tip_hash, miner)
+
+    copied.add_block(block)
+
+    assert copied.tip_hash == block.block_hash
+    assert chain.height == 0
+    assert not chain.contains(block.block_hash)
+
+
 def test_extension_becomes_active_without_reorganization() -> None:
     chain = Chain()
     _key, miner = _key_and_address()

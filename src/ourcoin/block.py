@@ -3,7 +3,14 @@
 from dataclasses import dataclass, replace
 
 from ourcoin.crypto import sha256_digest
-from ourcoin.encoding import encode_bytes, encode_text, encode_u16, encode_u64
+from ourcoin.encoding import (
+    CanonicalReader,
+    EncodingError,
+    encode_bytes,
+    encode_text,
+    encode_u16,
+    encode_u64,
+)
 from ourcoin.merkle import merkle_root
 from ourcoin.transaction import Transaction
 
@@ -14,6 +21,8 @@ REWARD_TRANSACTION_VERSION = 1
 HASH_LENGTH = 32
 TARGET_LENGTH = 32
 MAX_TARGET = (1 << 256) - 1
+MAX_CHAIN_ID_BYTES = 64
+MAX_ADDRESS_BYTES = 128
 
 
 class BlockEncodingError(ValueError):
@@ -52,6 +61,27 @@ class RewardTransaction:
             )
         )
 
+    @classmethod
+    def from_bytes(cls, encoded: bytes) -> "RewardTransaction":
+        """Decode one reward transaction from its exact canonical bytes."""
+
+        try:
+            reader = CanonicalReader(encoded)
+            domain = reader.read_bytes(max_length=len(REWARD_TRANSACTION_DOMAIN))
+            if domain != REWARD_TRANSACTION_DOMAIN:
+                raise BlockEncodingError("unknown reward transaction domain")
+            reward = cls(
+                version=reader.read_u16(),
+                chain_id=reader.read_text(max_length=MAX_CHAIN_ID_BYTES),
+                height=reader.read_u64(),
+                miner_address=reader.read_text(max_length=MAX_ADDRESS_BYTES),
+                amount_atoms=reader.read_u64(),
+            )
+            reader.ensure_finished()
+        except EncodingError as error:
+            raise BlockEncodingError("invalid canonical reward transaction encoding") from error
+        return reward
+
     @property
     def txid(self) -> bytes:
         return sha256_digest(self.to_bytes())
@@ -86,6 +116,46 @@ class BlockHeader:
                 encode_text(self.miner_address),
             )
         )
+
+    @classmethod
+    def from_bytes(cls, encoded: bytes) -> "BlockHeader":
+        """Decode one header from its exact canonical bytes."""
+
+        try:
+            reader = CanonicalReader(encoded)
+            domain = reader.read_bytes(max_length=len(BLOCK_HEADER_DOMAIN))
+            if domain != BLOCK_HEADER_DOMAIN:
+                raise BlockEncodingError("unknown block header domain")
+            version = reader.read_u16()
+            chain_id = reader.read_text(max_length=MAX_CHAIN_ID_BYTES)
+            height = reader.read_u64()
+            previous_block_hash = reader.read_bytes(max_length=HASH_LENGTH)
+            transactions_root_value = reader.read_bytes(max_length=HASH_LENGTH)
+            state_root = reader.read_bytes(max_length=HASH_LENGTH)
+            timestamp = reader.read_u64()
+            target_bytes = reader.read_bytes(max_length=TARGET_LENGTH)
+            header = cls(
+                version=version,
+                chain_id=chain_id,
+                height=height,
+                previous_block_hash=previous_block_hash,
+                transactions_root=transactions_root_value,
+                state_root=state_root,
+                timestamp=timestamp,
+                difficulty_target=int.from_bytes(target_bytes, "big"),
+                nonce=reader.read_u64(),
+                miner_address=reader.read_text(max_length=MAX_ADDRESS_BYTES),
+            )
+            reader.ensure_finished()
+            _exact_hash(header.previous_block_hash, "previous block hash")
+            _exact_hash(header.transactions_root, "transactions root")
+            _exact_hash(header.state_root, "state root")
+            if len(target_bytes) != TARGET_LENGTH:
+                raise BlockEncodingError("difficulty target must be exactly 32 bytes")
+            encode_target(header.difficulty_target)
+        except EncodingError as error:
+            raise BlockEncodingError("invalid canonical block header encoding") from error
+        return header
 
     @property
     def block_hash(self) -> bytes:

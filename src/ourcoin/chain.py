@@ -119,6 +119,14 @@ class Chain:
         entry = self._entries[self._active_tip_hash]
         return AccountState.from_snapshot(entry.state_snapshot, network=self._network)
 
+    def copy(self) -> "Chain":
+        """Return an independently mutable tree over immutable validated entries."""
+
+        copied = Chain(network=self._network)
+        copied._entries = self._entries.copy()
+        copied._active_tip_hash = self._active_tip_hash
+        return copied
+
     def contains(self, block_hash: bytes) -> bool:
         return block_hash in self._entries
 

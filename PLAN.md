@@ -9,10 +9,10 @@ before work starts on the next one.
 - [x] **M3 — blocks, emission and Proof of Work:** genesis, block validation and mining.
 - [x] **M4 — chain and reorganizations:** cumulative work, forks, rollback and difficulty.
 - [x] **M5 — mempool, miner and CLI:** transaction selection, wallets and local workflows.
-- [ ] **M6 — persistent storage:** transactional SQLite storage and state reconstruction.
+- [x] **M6 — persistent storage:** transactional SQLite storage and state reconstruction.
 - [ ] **M7 — peer-to-peer network:** synchronization, propagation and peer limits.
 - [ ] **M8 — API and explorer:** read API, transaction submission and local explorer.
 - [ ] **M9 — testnet hardening:** adversarial tests, fuzzing and long-running testnet.
 
-M5 is complete with a nonce-aware mempool, encrypted wallet files, local mining and
-reorganization reconciliation, fixed-point CLI amounts and an ephemeral testnet shell.
+M6 is complete with identity-isolated SQLite storage, atomic block/state commits, full
+branch replay, state reindexing and a persistent testnet shell.

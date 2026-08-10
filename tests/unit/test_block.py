@@ -7,7 +7,13 @@ from typing import Any
 
 import pytest
 
-from ourcoin.block import BlockEncodingError, hash_meets_target, transactions_root
+from ourcoin.block import (
+    BlockEncodingError,
+    BlockHeader,
+    RewardTransaction,
+    hash_meets_target,
+    transactions_root,
+)
 from ourcoin.consensus import TESTNET_INITIAL_TARGET, genesis_block
 from ourcoin.miner import MiningError, mine_block
 
@@ -70,3 +76,22 @@ def test_transaction_root_rejects_non_transaction_body_values() -> None:
 
     with pytest.raises(BlockEncodingError, match="tuple of Transaction"):
         transactions_root(genesis.reward_transaction, (object(),))  # type: ignore[arg-type]
+
+
+def test_header_and_reward_canonical_decoders_round_trip() -> None:
+    block = genesis_block()
+
+    assert BlockHeader.from_bytes(block.header.to_bytes()) == block.header
+    assert RewardTransaction.from_bytes(
+        block.reward_transaction.to_bytes()
+    ) == block.reward_transaction
+
+
+@pytest.mark.parametrize("change", [lambda value: value[:-1], lambda value: value + b"\x00"])
+def test_header_and_reward_decoders_reject_non_exact_data(change) -> None:
+    block = genesis_block()
+
+    with pytest.raises(BlockEncodingError):
+        BlockHeader.from_bytes(change(block.header.to_bytes()))
+    with pytest.raises(BlockEncodingError):
+        RewardTransaction.from_bytes(change(block.reward_transaction.to_bytes()))
