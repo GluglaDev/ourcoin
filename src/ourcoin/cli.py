@@ -1,6 +1,7 @@
-"""Command-line entry points for M5 local OurCoin workflows."""
+"""Command-line entry points for local OurCoin workflows through M7."""
 
 import argparse
+import asyncio
 import getpass
 import json
 import shlex
@@ -11,6 +12,13 @@ from pathlib import Path
 from ourcoin.consensus import ATOMS_PER_OUR
 from ourcoin.encoding import U64_MAX
 from ourcoin.node import LocalNode, NodeError
+from ourcoin.p2p import (
+    DEFAULT_LISTEN_HOST,
+    DEFAULT_TESTNET_PORT,
+    LOOPBACK_HOSTS,
+    P2PError,
+    P2PNode,
+)
 from ourcoin.storage import SQLiteChainStorage, StorageError, StorageInfo
 from ourcoin.wallet import Wallet, WalletError
 
@@ -174,6 +182,66 @@ def _storage_info_document(info: StorageInfo) -> dict[str, object]:
     }
 
 
+def _parse_peer_endpoint(value: str) -> tuple[str, int]:
+    host, separator, port_text = value.rpartition(":")
+    if not separator or host not in LOOPBACK_HOSTS:
+        raise CliError("peer must use localhost as HOST:PORT")
+    try:
+        port = int(port_text)
+    except ValueError as error:
+        raise CliError("peer port must be a decimal integer") from error
+    if not 1 <= port <= 0xFFFF:
+        raise CliError("peer port must be between 1 and 65535")
+    return host, port
+
+
+async def run_network_node(
+    data_dir: str | Path,
+    *,
+    host: str = DEFAULT_LISTEN_HOST,
+    port: int = DEFAULT_TESTNET_PORT,
+    peer_endpoints: Sequence[str] = (),
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Run a persistent localhost-only testnet peer until stopped."""
+
+    local_node = LocalNode.open_persistent(data_dir)
+    peer_node = P2PNode(local_node, host=host, port=port)
+    try:
+        await peer_node.start()
+        connected: list[dict[str, object]] = []
+        for value in peer_endpoints:
+            peer_host, peer_port = _parse_peer_endpoint(value)
+            info = await peer_node.connect(peer_host, peer_port)
+            connected.append(
+                {
+                    "node_id": info.node_id,
+                    "host": info.host,
+                    "port": info.port,
+                }
+            )
+        print(
+            json.dumps(
+                {
+                    "chain_id": local_node.network.chain_id,
+                    "height": local_node.chain.height,
+                    "host": peer_node.host,
+                    "node_id": peer_node.node_id.hex(),
+                    "peers": connected,
+                    "port": peer_node.port,
+                    "tip_hash": local_node.chain.tip_hash.hex(),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        event = asyncio.Event() if stop_event is None else stop_event
+        await event.wait()
+    finally:
+        await peer_node.close()
+        local_node.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ourcoin")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -192,6 +260,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "reindex", help="atomically rebuild persistent derived state"
     )
     chain_reindex.add_argument("--data-dir", type=Path, default=Path("data"))
+    node = subparsers.add_parser("node", help="run the local testnet peer service")
+    node_commands = node.add_subparsers(dest="node_command", required=True)
+    node_start = node_commands.add_parser("start", help="start a persistent P2P node")
+    node_start.add_argument("--data-dir", type=Path, default=Path("data"))
+    node_start.add_argument("--host", choices=sorted(LOOPBACK_HOSTS), default=DEFAULT_LISTEN_HOST)
+    node_start.add_argument("--port", type=int, default=DEFAULT_TESTNET_PORT)
+    node_start.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        metavar="HOST:PORT",
+        help="connect to a localhost peer; may be repeated",
+    )
     wallet = subparsers.add_parser("wallet", help="manage encrypted wallet files")
     wallet_commands = wallet.add_subparsers(dest="wallet_command", required=True)
     create = wallet_commands.add_parser("create", help="create an encrypted wallet")
@@ -234,6 +315,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "tip_hash": reindex_report.tip_hash.hex(),
                     }
                 print(json.dumps(document, indent=2, sort_keys=True))
+        elif arguments.command == "node":
+            try:
+                asyncio.run(
+                    run_network_node(
+                        arguments.data_dir,
+                        host=arguments.host,
+                        port=arguments.port,
+                        peer_endpoints=arguments.peer,
+                    )
+                )
+            except KeyboardInterrupt:
+                return 0
         elif arguments.wallet_command == "create":
             password = getpass.getpass("Wallet password: ")
             confirmation = getpass.getpass("Confirm password: ")
@@ -255,7 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
-    except (CliError, NodeError, StorageError, WalletError, OSError) as error:
+    except (CliError, NodeError, P2PError, StorageError, WalletError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     return 0

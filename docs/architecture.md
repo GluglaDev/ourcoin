@@ -23,9 +23,14 @@ M1 introduces three dependency-light foundations:
 - `wallet.py` keeps Ed25519 signing material in memory and stores it in authenticated,
   password-encrypted files.
 - `node.py` joins the chain, mempool and miner for single-process local workflows.
-- `cli.py` parses fixed-point OUR amounts and exposes the M5 demo, shell and wallet commands.
+- `cli.py` parses fixed-point OUR amounts and exposes local workflows, storage commands and
+  the persistent M7 peer service.
 - `storage.py` owns the SQLite schema, network identity checks, atomic persistence, replay
   validation and reindexing; it never stores wallet secrets.
+- `p2p_protocol.py` owns bounded canonical network frames and payload decoders. It treats every
+  received byte as untrusted and does not define consensus encodings.
+- `p2p.py` owns localhost TCP connections, handshakes, synchronization, relay, admission limits
+  and peer scoring. It delegates all block and transaction decisions to `LocalNode`.
 
 Later consensus objects must construct their signed or hashed bytes from the primitives in
 `encoding.py`. They must not serialize dictionaries, JSON objects or Python object state.
@@ -54,3 +59,14 @@ the current supply are derived caches that `chain reindex` can atomically rebuil
 
 Storage paths include both chain ID and genesis hash. Runtime opening is restricted to the
 defined testnet; the path boundary is generic only so future networks cannot share data.
+
+M7 wraps a persistent `LocalNode` without moving validation into the networking layer. Each
+connection must exchange `HELLO` first and match both the testnet chain ID and exact genesis
+hash. A peer advertises its active tip and cumulative work; a node that is behind sends a
+bounded block locator, validates returned blocks through the normal node path, commits them
+through M6 storage, and relays only accepted data. Side branches already held locally remain
+preserved, while initial synchronization transfers the remote peer's active chain.
+
+The asyncio service owns sockets only. `LocalNode` owns the chain and volatile mempool, and
+`SQLiteChainStorage` owns durability. CLI shutdown closes peer tasks and listening sockets
+before closing SQLite. M7 does not persist the mempool or wallet data.

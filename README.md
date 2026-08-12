@@ -4,10 +4,10 @@ OurCoin is an educational, experimental cryptocurrency implemented in Python 3.1
 It will use its own account-based blockchain, Proof of Work consensus, wallets and
 peer-to-peer network. It is not a token on another chain and is not a Bitcoin Core fork.
 
-Milestone **M6 — persistent storage** is complete. The repository contains transactional
-SQLite storage for all validated branches, the canonical account state and issued supply.
-The local node restores the same tip, balances and nonces after restart and can validate or
-reindex its derived state. Peer-to-peer networking is not implemented yet.
+Milestone **M7 — peer-to-peer network** is complete. Local testnet nodes communicate over
+bounded, canonical TCP frames, verify network identity during the handshake, synchronize the
+active chain and propagate validated blocks and transactions. SQLite preserves the blockchain,
+canonical account state and issued supply across node restarts.
 
 ## Safety
 
@@ -52,8 +52,19 @@ ourcoin chain validate
 ourcoin chain reindex
 ```
 
-All persistent commands accept `--data-dir PATH`. M6 supports only the defined testnet;
+All persistent commands accept `--data-dir PATH`. M7 supports only the defined testnet;
 mainnet activation remains a separate consensus-design task.
+
+Start two localhost peers in separate terminals:
+
+```powershell
+ourcoin node start --data-dir data/node-a --port 19733
+ourcoin node start --data-dir data/node-b --port 19734 --peer 127.0.0.1:19733
+```
+
+`node start` binds only to `127.0.0.1`, `::1` or `localhost`. There are no public seeds,
+internet exposure, NAT traversal or encrypted transport in M7. Stop a node with Ctrl+C;
+the network connection and SQLite database are then closed in a controlled order.
 
 See [OURCOIN_PROJECT_SPEC.md](OURCOIN_PROJECT_SPEC.md) for the protocol assumptions and
 [PLAN.md](PLAN.md) for the milestone roadmap.

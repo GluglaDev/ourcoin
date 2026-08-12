@@ -10,9 +10,13 @@ before work starts on the next one.
 - [x] **M4 — chain and reorganizations:** cumulative work, forks, rollback and difficulty.
 - [x] **M5 — mempool, miner and CLI:** transaction selection, wallets and local workflows.
 - [x] **M6 — persistent storage:** transactional SQLite storage and state reconstruction.
-- [ ] **M7 — peer-to-peer network:** synchronization, propagation and peer limits.
+- [x] **M7 — peer-to-peer network:** synchronization, propagation and peer limits.
 - [ ] **M8 — API and explorer:** read API, transaction submission and local explorer.
 - [ ] **M9 — testnet hardening:** adversarial tests, fuzzing and long-running testnet.
 
 M6 is complete with identity-isolated SQLite storage, atomic block/state commits, full
 branch replay, state reindexing and a persistent testnet shell.
+
+M7 is complete with a versioned canonical frame protocol, identity-bound handshake,
+active-chain synchronization, transaction and block relay, admission/rate limits and peer
+scoring. Runtime networking remains deliberately restricted to localhost testnet nodes.
