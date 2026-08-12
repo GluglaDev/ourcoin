@@ -5,7 +5,9 @@ import contextlib
 import os
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from ipaddress import IPv6Address, ip_address
+from math import isfinite
 
 from ourcoin.block import Block
 from ourcoin.chain import ChainError
@@ -40,6 +42,8 @@ HANDSHAKE_TIMEOUT_SECONDS = 5.0
 IDLE_TIMEOUT_SECONDS = 60.0
 SCORE_DISCONNECT_THRESHOLD = 100
 BAN_SECONDS = 60.0
+WRITE_TIMEOUT_SECONDS = 5.0
+MAX_PENDING_SENDS_PER_PEER = 16
 
 
 class P2PError(RuntimeError):
@@ -58,13 +62,38 @@ class HandshakeError(P2PError):
     """Raised when an outbound peer does not complete a valid handshake."""
 
 
+def _is_loopback_address(value: str) -> bool:
+    """Return whether a resolved numeric socket address is loopback-only."""
+
+    without_scope = value.partition("%")[0]
+    try:
+        address = ip_address(without_scope)
+    except ValueError:
+        return False
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_loopback
+    return address.is_loopback
+
+
+async def _close_stream_writer(
+    writer: asyncio.StreamWriter,
+    *,
+    timeout: float,
+) -> None:
+    writer.close()
+    with contextlib.suppress(ConnectionError, OSError, TimeoutError):
+        await asyncio.wait_for(writer.wait_closed(), timeout)
+
+
 @dataclass(frozen=True, slots=True)
 class PeerLimits:
     max_peers: int = 32
     max_peers_per_ip: int = 4
     max_messages_per_minute: int = 600
     max_bytes_per_minute: int = 32 * 1024 * 1024
+    max_pending_sends_per_peer: int = MAX_PENDING_SENDS_PER_PEER
     score_disconnect_threshold: int = SCORE_DISCONNECT_THRESHOLD
+    write_timeout_seconds: float = WRITE_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         values = (
@@ -72,10 +101,17 @@ class PeerLimits:
             self.max_peers_per_ip,
             self.max_messages_per_minute,
             self.max_bytes_per_minute,
+            self.max_pending_sends_per_peer,
             self.score_disconnect_threshold,
         )
         if any(type(value) is not int or value <= 0 for value in values):
             raise ValueError("peer limits must be positive integers")
+        if (
+            type(self.write_timeout_seconds) not in {int, float}
+            or self.write_timeout_seconds <= 0
+            or not isfinite(self.write_timeout_seconds)
+        ):
+            raise ValueError("peer write timeout must be positive and finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +172,10 @@ class _PeerConnection:
         self._rate_limiter = _RateLimiter(owner.limits)
         self._task: asyncio.Task[None] | None = None
         self._pending_ping: int | None = None
+        self._pending_sends = 0
+        self._block_request_outstanding = False
+        self._accepted_blocks_in_request = 0
+        self._block_request_start_work = 0
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -144,9 +184,21 @@ class _PeerConnection:
         if self.closed:
             raise PeerDisconnectedError("peer connection is closed")
         encoded = encode_frame(message_type, payload)
-        async with self._send_lock:
-            self.writer.write(encoded)
-            await self.writer.drain()
+        if self._pending_sends >= self.owner.limits.max_pending_sends_per_peer:
+            raise PeerDisconnectedError("peer outbound queue reached its resource limit")
+        self._pending_sends += 1
+        try:
+            try:
+                async with asyncio.timeout(self.owner.limits.write_timeout_seconds):
+                    async with self._send_lock:
+                        if self.closed:
+                            raise PeerDisconnectedError("peer connection is closed")
+                        self.writer.write(encoded)
+                        await self.writer.drain()
+            except TimeoutError as error:
+                raise PeerDisconnectedError("peer write timed out") from error
+        finally:
+            self._pending_sends -= 1
 
     async def reject(self, code: int, reason: str) -> None:
         safe_reason = reason[:256]
@@ -155,9 +207,14 @@ class _PeerConnection:
 
     def penalize(self, points: int) -> None:
         self.score += points
+        host_score = self.owner._host_scores.get(self.host, 0) + points
+        self.owner._host_scores[self.host] = host_score
         if self.hello is not None:
             self.owner._scores[self.hello.node_id] = self.score
-        if self.score >= self.owner.limits.score_disconnect_threshold:
+        if (
+            self.score >= self.owner.limits.score_disconnect_threshold
+            or host_score >= self.owner.limits.score_disconnect_threshold
+        ):
             self.owner._banned_until[self.host] = time.monotonic() + BAN_SECONDS
             raise ProtocolError("peer score reached the disconnect threshold")
 
@@ -196,7 +253,8 @@ class _PeerConnection:
             with contextlib.suppress(ProtocolError):
                 self.penalize(self.owner.limits.score_disconnect_threshold)
         except PeerFrameTimeoutError:
-            pass
+            with contextlib.suppress(ProtocolError):
+                self.penalize(20)
         except (ProtocolError, TransactionError):
             with contextlib.suppress(ProtocolError):
                 self.penalize(20)
@@ -214,9 +272,10 @@ class _PeerConnection:
             return
         self.closed = True
         self.owner._remove_connection(self)
-        self.writer.close()
-        with contextlib.suppress(ConnectionError, OSError):
-            await self.writer.wait_closed()
+        await _close_stream_writer(
+            self.writer,
+            timeout=self.owner.limits.write_timeout_seconds,
+        )
 
     def info(self) -> PeerInfo | None:
         if self.hello is None or self.closed:
@@ -230,6 +289,43 @@ class _PeerConnection:
             cumulative_work=self.hello.cumulative_work,
             score=self.score,
             outbound=self.outbound,
+        )
+
+    def begin_block_request(self, *, local_work: int) -> bool:
+        if self._block_request_outstanding:
+            return False
+        self._block_request_outstanding = True
+        self._accepted_blocks_in_request = 0
+        self._block_request_start_work = local_work
+        return True
+
+    def cancel_block_request(self) -> None:
+        self._block_request_outstanding = False
+        self._accepted_blocks_in_request = 0
+        self._block_request_start_work = 0
+
+    def note_accepted_block(self) -> None:
+        if self._block_request_outstanding:
+            self._accepted_blocks_in_request += 1
+
+    def finish_block_request(self) -> tuple[int, int] | None:
+        if not self._block_request_outstanding:
+            return None
+        accepted = self._accepted_blocks_in_request
+        start_work = self._block_request_start_work
+        self.cancel_block_request()
+        return accepted, start_work
+
+    def update_advertised_summary(self, summary: ChainSummary) -> None:
+        if self.hello is None:
+            raise ProtocolError("peer summary arrived before HELLO")
+        if summary.cumulative_work < self.hello.cumulative_work:
+            raise ProtocolError("peer cumulative work moved backwards")
+        self.hello = replace(
+            self.hello,
+            tip_hash=summary.tip_hash,
+            height=summary.height,
+            cumulative_work=summary.cumulative_work,
         )
 
 
@@ -261,6 +357,7 @@ class P2PNode:
         self._connections: set[_PeerConnection] = set()
         self._by_node_id: dict[bytes, _PeerConnection] = {}
         self._scores: dict[bytes, int] = {}
+        self._host_scores: dict[str, int] = {}
         self._banned_until: dict[str, float] = {}
 
     @property
@@ -284,6 +381,15 @@ class P2PNode:
         if not sockets:
             await self.close()
             raise P2PError("peer server did not create a listening socket")
+        for sock in sockets:
+            socket_name = sock.getsockname()
+            if (
+                not isinstance(socket_name, tuple)
+                or not socket_name
+                or not _is_loopback_address(str(socket_name[0]))
+            ):
+                await self.close()
+                raise LocalTestnetOnlyError("resolved listen address is not loopback")
         socket_name = sockets[0].getsockname()
         self.port = int(socket_name[1])
 
@@ -298,8 +404,13 @@ class P2PNode:
 
     def _can_accept(self, host: str) -> bool:
         banned_until = self._banned_until.get(host, 0.0)
+        current = time.monotonic()
+        if banned_until and current >= banned_until:
+            self._banned_until.pop(host, None)
+            self._host_scores.pop(host, None)
+            banned_until = 0.0
         return (
-            time.monotonic() >= banned_until
+            current >= banned_until
             and len(self._connections) < self.limits.max_peers
             and self._host_connection_count(host) < self.limits.max_peers_per_ip
         )
@@ -312,12 +423,16 @@ class P2PNode:
         try:
             host, port = self._endpoint(writer)
         except P2PError:
-            writer.close()
-            await writer.wait_closed()
+            await _close_stream_writer(
+                writer,
+                timeout=self.limits.write_timeout_seconds,
+            )
             return
-        if not self._can_accept(host):
-            writer.close()
-            await writer.wait_closed()
+        if not _is_loopback_address(host) or not self._can_accept(host):
+            await _close_stream_writer(
+                writer,
+                timeout=self.limits.write_timeout_seconds,
+            )
             return
         connection = _PeerConnection(
             self,
@@ -341,9 +456,17 @@ class P2PNode:
             raise PeerLimitError("peer limit or temporary ban prevents connection")
         reader, writer = await asyncio.open_connection(host, port)
         endpoint_host, endpoint_port = self._endpoint(writer)
+        if not _is_loopback_address(endpoint_host):
+            await _close_stream_writer(
+                writer,
+                timeout=self.limits.write_timeout_seconds,
+            )
+            raise LocalTestnetOnlyError("resolved peer address is not loopback")
         if not self._can_accept(endpoint_host):
-            writer.close()
-            await writer.wait_closed()
+            await _close_stream_writer(
+                writer,
+                timeout=self.limits.write_timeout_seconds,
+            )
             raise PeerLimitError("resolved peer endpoint exceeds a connection limit")
         connection = _PeerConnection(
             self,
@@ -416,8 +539,17 @@ class P2PNode:
             hashes.append(genesis_hash)
         return BlockLocator(tuple(hashes))
 
-    async def _request_blocks(self, connection: _PeerConnection) -> None:
-        await connection.send(MessageType.GET_BLOCKS, self._block_locator().to_bytes())
+    async def _request_blocks(self, connection: _PeerConnection) -> bool:
+        if not connection.begin_block_request(
+            local_work=self.local_node.chain.cumulative_work
+        ):
+            return False
+        try:
+            await connection.send(MessageType.GET_BLOCKS, self._block_locator().to_bytes())
+        except BaseException:
+            connection.cancel_block_request()
+            raise
+        return True
 
     async def _send_blocks(self, connection: _PeerConnection, locator: BlockLocator) -> None:
         active = self.local_node.chain.active_chain()
@@ -455,7 +587,35 @@ class P2PNode:
             connection.penalize(20)
             await connection.reject(30, "invalid block")
             return
+        connection.note_accepted_block()
         await self._broadcast(MessageType.BLOCK, encode_block(block), exclude=connection)
+
+    async def _handle_sync_complete(
+        self,
+        connection: _PeerConnection,
+        summary: ChainSummary,
+    ) -> None:
+        if self.local_node.chain.contains(summary.tip_hash):
+            record = self.local_node.chain.get_record(summary.tip_hash)
+            if (
+                record.height != summary.height
+                or record.cumulative_work != summary.cumulative_work
+            ):
+                raise ProtocolError("peer summary contradicts a known block")
+        connection.update_advertised_summary(summary)
+        request_progress = connection.finish_block_request()
+        local_work = self.local_node.chain.cumulative_work
+        if summary.cumulative_work <= local_work:
+            return
+        if (
+            request_progress is not None
+            and request_progress[0] == 0
+            and local_work <= request_progress[1]
+        ):
+            connection.penalize(20)
+            await connection.reject(32, "block synchronization made no progress")
+            raise PeerDisconnectedError("peer claimed higher work without progress")
+        await self._request_blocks(connection)
 
     async def _handle_transaction(
         self,
@@ -493,9 +653,10 @@ class P2PNode:
                 Transaction.from_bytes(frame.payload),
             )
         elif frame.message_type is MessageType.SYNC_COMPLETE:
-            summary = ChainSummary.from_bytes(frame.payload)
-            if summary.cumulative_work > self.local_node.chain.cumulative_work:
-                await self._request_blocks(connection)
+            await self._handle_sync_complete(
+                connection,
+                ChainSummary.from_bytes(frame.payload),
+            )
         elif frame.message_type is MessageType.PING:
             await connection.send(MessageType.PONG, encode_ping(decode_ping(frame.payload)))
         elif frame.message_type is MessageType.PONG:

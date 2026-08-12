@@ -199,6 +199,10 @@ Version 1 defines these messages:
 An idle connection sends a nonce-bearing `PING`; the matching `PONG` proves liveness. A missing
 or mismatched answer closes the connection.
 
+Each peer permits at most 16 pending outbound messages. Acquiring the send lock, writing and
+draining a frame share a five-second deadline; a timeout closes the connection. Stream shutdown
+uses the same bounded wait, so a non-reading peer cannot indefinitely stall relay or node exit.
+
 The block transport envelope is
 `bytes("OURCOIN:P2P:BLOCK:V1") || bytes(header) || bytes(reward) || sequence(transactions)`.
 The three components are exactly the existing M1/M3 canonical encodings, so the envelope does
@@ -208,3 +212,10 @@ Locators use the active tip followed by increasingly sparse ancestors and always
 genesis. A response carries at most 128 consecutive active-chain blocks. If more remain, the
 receiver observes the higher `SYNC_COMPLETE` work and requests the next batch. Every received
 block and transaction passes through the existing node validation path before relay.
+
+A connection may have only one outstanding `GET_BLOCKS`. The requester records its starting
+work and counts newly accepted blocks, including blocks accepted on a side branch. A valid
+`SYNC_COMPLETE` refreshes that peer's advertised tip, height and cumulative work. If it still
+claims higher work after a requested batch produced neither an accepted block nor other local
+chain-work progress, the peer is penalized and disconnected instead of triggering another
+request. This bounds dishonest higher-work advertisements to one no-progress round trip.

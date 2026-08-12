@@ -40,10 +40,17 @@ must not partially mutate state.
 - TCP frames have fixed prefixes, checksums, an 8 MiB payload ceiling and bounded canonical
   payload collections. Unknown protocol versions and malformed input close the connection.
 - The handshake binds peers to both `chain_id` and genesis hash and rejects self-connections
-  and duplicate node IDs. Node IDs are ephemeral identifiers, not authentication keys.
+  and duplicate node IDs. Failed handshakes accumulate per-address penalties and can trigger a
+  temporary ban. Node IDs are ephemeral identifiers, not authentication keys.
 - Global and per-IP connection limits, per-minute message/byte limits and peer scores bound
   basic resource abuse. Invalid blocks and transactions add penalties; threshold violations
   disconnect and temporarily ban the loopback address.
+- Listener and outbound socket addresses are verified after name resolution and binding; an
+  allowed `localhost` spelling cannot resolve to a non-loopback endpoint. Outbound queues and
+  writes have fixed bounds, and slow readers are disconnected instead of blocking relay.
+- Synchronization permits one outstanding block request per peer. A higher-work completion
+  without accepted blocks or local work progress is scored and disconnected, preventing an
+  untrusted summary from creating an unbounded request loop.
 - Network input never bypasses transaction, Proof-of-Work, state or chain validation. SQLite
   persistence still uses the M6 candidate-copy and atomic-commit boundary.
 - M7 is localhost-only. It provides no confidentiality, peer authentication, Sybil resistance,
